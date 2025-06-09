@@ -139,7 +139,7 @@ async fn handle_socket(user: AuthUser, socket: WebSocket, state: AppState) {
     }
   }
 
-  info!("WebSocket closed for user {}", user.email);
+  info!("WebSocket closed for user {} with client {}", user.email, client_id);
   send_task.abort();
 
   {

@@ -65,7 +65,7 @@ pub async fn insert_metadata(
 pub async fn delete_metadata(
   client: &tokio_postgres::Client,
   user_id: &uuid::Uuid,
-  object_path: &str // Assuming you want to delete by object_path
+  object_path: &str
 ) -> Result<u64, Box<dyn std::error::Error>> {
   let stmt = client.prepare("DELETE FROM fonts WHERE user_id = $1 AND object_path = $2").await?;
 
@@ -75,7 +75,7 @@ pub async fn delete_metadata(
 }
 
 pub async fn check_duplicate(
-  client: &tokio_postgres::Client, // Replace with your actual DB client type
+  client: &tokio_postgres::Client,
   user_id: &uuid::Uuid,
   checksum: &str,
   object_path: &str
