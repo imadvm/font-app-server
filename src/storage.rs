@@ -49,6 +49,7 @@ pub async fn upload_font(
   let mut file_name = String::new();
   let mut font_records = Vec::new();
   let mut relative_path = None;
+  let mut user_key: String = "".to_string();
 
   while
     let Some(field) = multipart
@@ -78,7 +79,8 @@ pub async fn upload_font(
       .bytes().await
       .map_err(|e| { (StatusCode::BAD_REQUEST, format!("Failed to read file data: {}", e)) })?;
 
-    let user_key = format!("{}/{}", user.user_id, relative_path.as_deref().unwrap_or(&file_name));
+    user_key = format!("{}/{}", user.user_id, relative_path.as_deref().unwrap_or(&file_name));
+    println!("{}", user_key);
 
     let (family, subfamily, checksum) = extract_metadata(&data)
       .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid font file: {}", e)))?
@@ -87,8 +89,7 @@ pub async fn upload_font(
         "Could not extract font metadata from uploaded file".to_string(),
       ))?;
 
-    info!("Uploading font: family = {}, subfamily = {}", family, subfamily);
-
+    info!("Checking for duplicates for user {} and checksum {}", user.email, checksum);
     if
       let Some(existing_path) = check_duplicate(
         &state.db_client,
@@ -134,6 +135,7 @@ pub async fn upload_font(
       }
     }
 
+    info!("Initiating S3 put_object for key: {}", user_key);
     let body = ByteStream::from(data);
     if
       let Err(e) = state.s3_client
@@ -155,6 +157,7 @@ pub async fn upload_font(
         }
       }
 
+      error!("Failed to upload file '{}' to S3: {:?}", file_name, e);
       return Err((
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("Failed to upload file '{}': Server error", &file_name),
@@ -168,26 +171,29 @@ pub async fn upload_font(
       checksum,
     });
 
-    info!("User {} uploaded file: {}", user.email, file_name);
+    info!("User {} - Client {} uploaded file: {}", user.email, user.client_id, file_name);
   }
 
-  if !font_records.is_empty() {
-    if let Err(e) = insert_metadata(&state.db_client, &user.user_id, &font_records).await {
-      error!("Failed to insert font metadata: {}", e);
+  if let Err(db_err) = insert_metadata(&state.db_client, &user.user_id, &font_records).await {
+    error!("Failed to insert font metadata: {}", db_err);
 
-      return Err((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "File uploaded but failed to save metadata".to_string(),
-      ));
-    }
-    info!("Successfully inserted {} font records into database", font_records.len());
+    return Err((
+      StatusCode::INTERNAL_SERVER_ERROR,
+      "File uploaded but failed to insert metadata".to_string(),
+    ));
   }
+  info!("Successfully inserted {} font records into database", font_records.len());
 
   if let Some(_record) = font_records.first() {
     let path_result = PathBuf::from_str(relative_path.as_deref().unwrap_or(&file_name));
     let path = path_result.expect("Failed to convert to PathBuf");
 
-    let sync_msg = SyncMessage::ObjectCreated { path, source: SyncSource::Server };
+    let sync_msg = SyncMessage::ObjectCreated {
+      path,
+      source: SyncSource::Server,
+      client_id: user.client_id,
+      user_id: user.user_id,
+    };
 
     if let Err(e) = state.notify_tx.send(sync_msg).await {
       error!("Failed to notify about new file: {}", e);
@@ -204,7 +210,7 @@ pub async fn get_font(
 ) -> impl IntoResponse {
   let user_key = format!("{}/{}", user.user_id, key);
 
-  info!("User {} downloading file: {}", user.email, key);
+  info!("User {} - Client {} downloading file: {}", user.email, user.client_id, key);
   let object = match state.s3_client.get_object().bucket(S3_BUCKET).key(&user_key).send().await {
     Ok(obj) => obj,
     Err(e) => {
@@ -237,7 +243,7 @@ pub async fn delete_font(
 ) -> impl IntoResponse {
   let user_key = format!("{}/{}", user.user_id, key);
 
-  info!("User {} deleting file: {}", user.email, key);
+  info!("User {} - Client {} deleting file: {}", user.email, user.client_id, key);
 
   match state.s3_client.head_object().bucket(S3_BUCKET).key(&user_key).send().await {
     Ok(_) => {
@@ -249,6 +255,8 @@ pub async fn delete_font(
               let sync_msg = SyncMessage::ObjectDeleted {
                 path: key.clone().into(),
                 source: SyncSource::Server,
+                client_id: user.client_id,
+                user_id: user.user_id,
               };
               tokio::spawn({
                 let notify_tx = state.notify_tx.clone();

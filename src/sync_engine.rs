@@ -8,7 +8,7 @@ use futures::{ SinkExt, StreamExt };
 use log::{ error, info };
 use serde::{ Deserialize, Serialize };
 use uuid::Uuid;
-use crate::{ app_state::AppState, auth::AuthUser };
+use crate::{ app_state::{ AppState, SyncClient }, auth::AuthUser };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -19,29 +19,43 @@ pub enum SyncMessage {
   FileCreated {
     path: PathBuf,
     source: SyncSource,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   FolderCreated {
     path: PathBuf,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   FileChanged {
     path: PathBuf,
     timestamp: SystemTime,
     source: SyncSource,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   FileDeleted {
     path: PathBuf,
     source: SyncSource,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   FolderDeleted {
     path: PathBuf,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   ObjectCreated {
     path: PathBuf,
     source: SyncSource,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   ObjectDeleted {
     path: PathBuf,
     source: SyncSource,
+    client_id: Uuid,
+    user_id: Uuid,
   },
   Ping,
   Pong,
@@ -55,7 +69,7 @@ pub enum SyncSource {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncEnvelope {
-  pub client_id: Uuid,
+  pub sender_id: Uuid,
   pub message: SyncMessage,
 }
 
@@ -68,18 +82,25 @@ pub async fn ws_handler(
 }
 
 async fn handle_socket(user: AuthUser, socket: WebSocket, state: AppState) {
-  let client_id = Uuid::new_v4();
   info!("WebSocket connected for user: {}", user.email);
 
   let (mut sender, mut receiver) = socket.split();
   let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
+  let client_id = Uuid::new_v4();
+  info!("Assigned session ID {} to user {}", client_id, user.email);
+
   {
     let mut clients_lock = state.sync_clients.lock().await;
-    clients_lock.push((client_id, tx.clone()));
+    let sync_client = SyncClient {
+      client_id,
+      user_id: user.user_id.clone(),
+      sender: tx.clone(),
+    };
+    clients_lock.push(sync_client);
 
     let init_message = SyncEnvelope {
-      client_id,
+      sender_id: state.server_id,
       message: SyncMessage::Init { client_id },
     };
 
@@ -103,20 +124,17 @@ async fn handle_socket(user: AuthUser, socket: WebSocket, state: AppState) {
           info!("Received from client: {:?}", envelope);
 
           let clients_guard = state.sync_clients.lock().await;
-          for (other_id, client) in clients_guard.iter() {
-            if *other_id != envelope.client_id {
-              let _ = client.send(Message::Text(text.clone()));
+          for sync_client in clients_guard.iter() {
+            if
+              sync_client.client_id != envelope.sender_id &&
+              sync_client.client_id != state.server_id &&
+              sync_client.user_id == user.user_id
+            {
+              let _ = sync_client.sender.send(Message::Text(text.clone()));
             }
           }
         }
         Err(e) => error!("Failed to deserialize server message: {}", e),
-      }
-
-      let clients_guard = state.sync_clients.lock().await;
-      for (other_id, client) in clients_guard.iter() {
-        if *other_id != client_id {
-          let _ = client.send(Message::Text(text.clone()));
-        }
       }
     }
   }
@@ -126,6 +144,6 @@ async fn handle_socket(user: AuthUser, socket: WebSocket, state: AppState) {
 
   {
     let mut clients_lock = state.sync_clients.lock().await;
-    clients_lock.retain(|(id, _)| *id != client_id);
+    clients_lock.retain(|sync_client| sync_client.client_id != client_id);
   }
 }

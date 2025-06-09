@@ -51,6 +51,7 @@ pub struct AuthUser {
   pub user_id: Uuid,
   pub email: String,
   pub audience: String,
+  pub client_id: Uuid,
 }
 
 fn verify_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
@@ -91,10 +92,17 @@ impl<S> FromRequestParts<S> for AuthUser where S: Send + Sync {
       "Invalid user ID in token".to_string(),
     ))?;
 
+    let client_id = headers
+      .get("X-Client-Sync-Id")
+      .and_then(|h| h.to_str().ok())
+      .and_then(|s| Uuid::parse_str(s).ok())
+      .unwrap_or_else(Uuid::nil);
+
     Ok(AuthUser {
       user_id,
       email: claims.email.clone(),
       audience: claims.aud,
+      client_id,
     })
   }
 }
